@@ -1,0 +1,105 @@
+create table ldltmp.test_scd_dwd
+(
+    id int,
+    name string
+)
+stored as parquet;
+
+create table ldltmp.test_scd_dws
+(
+    id int,
+    name string,
+    start_date string,
+    end_date string,
+    is_current_flag tinyint
+)
+stored as parquet;
+
+create table ldltmp.test_scd_dws_bak
+(
+    id int,
+    name string,
+    start_date string,
+    end_date string,
+    is_current_flag tinyint
+)
+PARTITIONED BY (scd_date string)
+stored as parquet;
+
+INSERT OVERWRITE TABLE ldltmp.test_scd_dwd
+SELECT 1, 'a1'
+UNION ALL
+SELECT 2, 'b4'
+UNION ALL
+SELECT 3, 'c1'
+UNION ALL
+SELECT 4, 'd'
+UNION ALL
+SELECT 5, 'e'
+UNION ALL
+SELECT 7, 'g'
+
+INSERT OVERWRITE TABLE ldltmp.test_scd_dws
+SELECT 1, 'a', '2020-01-01', '9999-12-31', 1
+UNION ALL
+SELECT 2, 'b', '2020-01-01', '2020-01-07', 0
+UNION ALL
+SELECT 3, 'c', '2020-01-01', '9999-12-31', 1
+UNION ALL
+SELECT 4, 'd', '2020-01-01', '9999-12-31', 1
+UNION ALL
+SELECT 6, 'f', '2020-01-01', '9999-12-31', 1
+UNION ALL
+SELECT 2, 'b1', '2020-01-08', '9999-12-31', 1
+
+
+-------------------------------------------------------------
+SET spark.sql.hive.convertMetastoreParquet=false;
+SET spark.sql.parser.quotedRegexColumnNames=true;
+set hive.exec.max.dynamic.partitions=10000;
+set hive.exec.max.dynamic.partitions.pernode=10000;
+set hive.exec.dynamic.partition=true;
+set hive.exec.dynamic.partition.mode=nonstrict;
+set spark.sql.shuffle.partition=1000;
+
+CREATE OR REPLACE TEMPORARY VIEW dws
+AS
+    SELECT *, HASH(`(id|start_date|end_date|is_current_flag)?+.+`) AS hash_all FROM ldltmp.test_scd_dws
+;
+
+CREATE OR REPLACE TEMPORARY VIEW dwd
+AS
+    SELECT *, HASH(`(id)?+.+`) AS hash_all FROM ldltmp.test_scd_dwd
+;
+
+CREATE OR REPLACE TEMPORARY VIEW dws_modify
+AS
+    SELECT dwd.`(hash_all)?+.+`, DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd'), '9999-12-31' , 1
+    FROM dws INNER JOIN dwd ON dws.id = dwd.id AND dws.hash_all <> dwd.hash_all AND dws.is_current_flag = 1
+;
+
+WITH scd_table AS
+(
+    --dwd new
+    SELECT dwd.`(hash_all)?+.+`, DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd'), '9999-12-31', 1
+    FROM dwd LEFT JOIN dws ON dwd.id = dws.id
+    WHERE dws.id IS NULL
+    UNION ALL
+    --keep dws exists AND keep current_flag = 0
+    SELECT dws.`(hash_all)?+.+`
+    FROM dws LEFT JOIN dws_modify ON dws.id = dws_modify.id
+    where dws_modify.id IS NULL OR is_current_flag = 0
+    UNION ALL
+    --modify dws data current_flag = 1 to 0
+    SELECT dws.`(end_date|is_current_flag|hash_all)?+.+`, DATE_FORMAT(DATE_SUB(CURRENT_TIMESTAMP(), 1), 'yyyy-MM-dd'), 0
+    FROM dws INNER JOIN dws_modify ON dws.id = dws_modify.id
+    WHERE dws.is_current_flag = 1
+    UNION ALL
+    --add dwd modify data to dws, add current_flag to 1
+    SELECT * FROM dws_modify
+)
+
+FROM scd_table
+INSERT OVERWRITE TABLE ldltmp.test_scd_dws SELECT *
+INSERT OVERWRITE TABLE ldltmp.test_scd_dws_bak SELECT *, DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd')
+;

@@ -1,0 +1,128 @@
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.dynamic.partition=true;
+SET spark.sql.hive.convertMetastoreParquet=false;
+SET spark.sql.parser.quotedRegexColumnNames=true;
+SET spark.sql.shuffle.partitions=200;
+
+--tmp层中间表
+DROP TABLE IF EXISTS ldltmp.lipstick_tmp;
+CREATE TABLE IF NOT EXISTS ldltmp.lipstick_tmp(
+item_code            string COMMENT '宝贝id'
+,link_code           string COMMENT '链接id'
+,month               string COMMENT '月份'
+,category            string COMMENT '品类'
+,etl_batch_id        string COMMENT 'ETL Batch编号'
+,etl_load_time       string COMMENT 'ETL 时间'
+)STORED AS TEXTFILE
+;
+--src
+DROP TABLE IF EXISTS ldlsrc.lipstick;
+CREATE TABLE IF NOT EXISTS ldlsrc.lipstick(
+item_code            string COMMENT '宝贝id'
+,link_code           string COMMENT '链接id'
+,month               string COMMENT '月份'
+,category            string COMMENT '品类'
+,etl_batch_id        string COMMENT 'ETL Batch编号'
+,etl_load_time       string COMMENT 'ETL 时间'
+)
+PARTITIONED BY (load_date string)
+STORED AS PARQUET;
+
+--dwd
+DROP TABLE IF EXISTS ldldwd.lipstick;
+CREATE TABLE IF NOT EXISTS ldldwd.lipstick(
+item_code            string COMMENT '宝贝id'
+,link_code           string COMMENT '链接id'
+,month               string COMMENT '月份'
+,category            string COMMENT '品类'
+,etl_batch_id        string COMMENT 'ETL Batch编号'
+,etl_load_time       string COMMENT 'ETL 时间'
+)PARTITIONED BY (partition_year_month string)
+STORED AS PARQUET
+;
+
+
+--src逻辑
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.dynamic.partition=true;
+
+SET mapreduce.job.queuename= root.ldl.color-trend;
+
+--将HBASE映射表的数据抽到tmp层中间表
+INSERT OVERWRITE DIRECTORY 'hdfs://nameservice1/data/ldltmp/lipstick_tmp'
+select
+item_code
+,link_code
+,month
+,category
+,etl_batch_id
+,etl_load_time
+FROM ldltmp.lipstick;
+
+--将ldltmp层中间表的数据插入ldlsrc层的表
+INSERT OVERWRITE TABLE ldlsrc.lipstick PARTITION(load_date)
+select
+item_code
+,link_code
+,month
+,category
+,etl_batch_id
+,etl_load_time
+,'@src_partition_date@' AS load_date
+from ldltmp.lipstick_tmp
+;
+
+
+
+
+--dwd逻辑
+--增量更新逻辑
+INSERT OVERWRITE TABLE ldldwd.lipstick PARTITION(partition_year_month)
+SELECT
+item_code
+,link_code
+,month
+,category
+,etl_batch_id
+,etl_load_time
+,partition_year_month
+FROM(
+     SELECT
+          item_code
+          ,link_code
+          ,month
+          ,category
+          ,etl_batch_id
+          ,etl_load_time
+          ,partition_year_month
+          ,rn
+          ,ROW_NUMBER() OVER(PARTITION BY item_code,month ORDER BY rn DESC) AS row_num
+     FROM(
+          SELECT
+          item_code
+          ,link_code
+          ,month
+          ,category
+          ,etl_batch_id
+          ,etl_load_time
+          ,month as partition_year_month
+          ,1 as rn
+          FROM ldlsrc.lipstick
+          WHERE load_date = '@src_partition_date@'
+
+          UNION ALL
+
+          SELECT
+          item_code
+          ,link_code
+          ,month
+          ,category
+          ,etl_batch_id
+          ,etl_load_time
+          ,partition_year_month
+          ,0 AS rn
+          FROM ldldwd.lipstick
+          ) temp1
+)temp2
+WHERE row_num = 1
+;

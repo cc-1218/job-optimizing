@@ -1,0 +1,110 @@
+CREATE TABLE  ldldws.area_dbname
+(
+  distribute_code     STRING  ,
+  division_code       STRING  ,
+  dis_db_name         STRING  ,
+  use_flag            STRING  ,
+  pos_use_flag        STRING  ,
+  start_date           STRING ,
+  end_date             STRING ,
+  is_current_flag     INT
+)
+STORED AS PARQUET
+;
+
+CREATE TABLE  ldldwd.area_dbname
+(
+  area_code        STRING ,
+  brand_code       STRING ,
+  dis_db_name      STRING ,
+  use_flag         STRING ,
+  pos_use_flag     STRING
+)
+STORED AS PARQUET
+;
+
+SET spark.sql.parser.quotedRegexColumnNames=true;
+
+
+INSERT OVERWRITE TABLE ldldwd.area_dbname
+SELECT
+ area_code
+,brand_code
+,dis_dbname
+,use_flag
+,pos_use_flag
+FROM
+(
+    SELECT
+      *
+      ,RANK() OVER(ORDER BY pt_import_date DESC ) AS rn
+    FROM ldlsrc.mdm_area_dbname
+    WHERE pt_import_date >= DATE_SUB('@src_partition_date@',3)
+    --WHERE pt_import_date = '2021-06-03'
+) tmp
+WHERE tmp.rn = 1
+;
+
+SET spark.sql.hive.convertMetastoreParquet=false;
+SET spark.sql.parser.quotedRegexColumnNames=true;
+set hive.exec.dynamic.partition=true;
+set hive.exec.dynamic.partition.mode=nonstrict;
+--set spark.sql.shuffle.partition=200;
+
+----取dws历史的
+CREATE OR REPLACE TEMPORARY VIEW dws
+AS
+SELECT *, HASH(`(distribute_code|division_code|start_date|end_date|is_current_flag)?+.+`) AS hash_all FROM ldldws.area_dbname
+;
+
+----取dwd包含改变的和新增的
+CREATE OR REPLACE TEMPORARY VIEW dwd
+AS
+SELECT *, HASH(`(area_code|brand_code)?+.+`) AS hash_all
+FROM ldldwd.mdm_area_dbname
+;
+
+
+---- 取dwd中变化的新数据
+CREATE OR REPLACE TEMPORARY VIEW dws_modify
+AS
+SELECT dwd.`(hash_all)?+.+`,
+DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd') AS start_date,
+--'2021-06-04'AS start_date,
+'9999-12-31' AS end_date, 1
+FROM dws INNER JOIN dwd ON dws.distribute_code = dwd.area_code AND dws.division_code = dwd.brand_code AND dws.hash_all <> dwd.hash_all AND dws.is_current_flag = 1
+;
+
+---- 合并数据集
+WITH scd_table AS
+(
+  --dwd new
+  SELECT dwd.`(hash_all)?+.+`,
+  DATE_FORMAT(CURRENT_TIMESTAMP(), 'yyyy-MM-dd') AS start_date,
+  --'2021-06-04'AS start_date,
+  '9999-12-31' AS end_date, 1
+  FROM dwd LEFT JOIN dws ON dws.distribute_code = dwd.area_code AND dws.division_code = dwd.brand_code
+  WHERE dws.distribute_code IS NULL and dws.division_code IS NULL
+  UNION ALL
+  --keep dws exists AND keep current_flag = 0
+  SELECT dws.`(hash_all)?+.+`
+  FROM dws LEFT JOIN dws_modify ON dws.distribute_code = dws_modify.area_code AND dws.division_code = dws_modify.brand_code
+  where dws_modify.area_code IS NULL and dws_modify.brand_code IS NULL OR is_current_flag = 0
+  UNION ALL
+  --modify dws data current_flag = 1 to 0
+  SELECT dws.`(end_date|is_current_flag|hash_all)?+.+`,
+  DATE_FORMAT(DATE_SUB(CURRENT_TIMESTAMP(), 1), 'yyyy-MM-dd') AS end_date,
+  --'2021-06-04' AS end_date,
+  0
+  FROM dws INNER JOIN dws_modify ON dws.distribute_code = dws_modify.area_code AND dws.division_code = dws_modify.brand_code
+  WHERE dws.is_current_flag = 1
+  UNION ALL
+  --add dwd modify data to dws, add current_flag to 1
+  SELECT * FROM dws_modify
+)
+--插入目标表
+FROM scd_table
+INSERT OVERWRITE TABLE ldldws.area_dbname SELECT *
+WHERE end_date >= start_date
+--DISTRIBUTE BY CAST(RAND() * 2 AS INT)
+;

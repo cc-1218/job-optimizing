@@ -1,0 +1,57 @@
+--全量覆盖
+--src
+CREATE TABLE IF NOT EXISTS ldlsrc.province
+(
+  prvn_code                STRING COMMENT  '省份代码',
+  prvn_name_ch             STRING COMMENT  '省份中文名',
+  prvn_name_en             STRING COMMENT  '省份英文名',
+  help_code                STRING COMMENT  '助记码',
+  capital_city             STRING COMMENT  '省会城市',
+  update_date              STRING COMMENT  '更新日期',
+  update_by                STRING COMMENT  '更新人',
+  create_by                STRING COMMENT  '创建人',
+  create_date              STRING COMMENT  '创建日期'
+)
+PARTITIONED BY (pt_import_date STRING   COMMENT '数据导入时间')
+STORED AS PARQUET
+;
+
+--dwd
+CREATE TABLE IF NOT EXISTS ldldwd.province
+(
+  prvn_code                STRING COMMENT  '省份代码',
+  prvn_name_ch             STRING COMMENT  '省份中文名',
+  prvn_name_en             STRING COMMENT  '省份英文名',
+  help_code                STRING COMMENT  '助记码',
+  capital_city             STRING COMMENT  '省会城市',
+  update_date              STRING COMMENT  '更新日期',
+  update_by                STRING COMMENT  '更新人',
+  create_by                STRING COMMENT  '创建人',
+  create_date              STRING COMMENT  '创建日期'
+)
+STORED AS PARQUET
+;
+
+--src逻辑
+SET spark.sql.hive.convertMetastoreParquet=false;
+SET hive.exec.dynamic.partition.mode=nonstrict;
+SET hive.exec.dynamic.partition=true;
+
+
+INSERT OVERWRITE TABLE ldlsrc.province PARTITION (pt_import_date)
+SELECT
+  *
+  ,'@src_partition_date@' AS pt_import_date
+FROM ldltmp.province
+;
+
+--dwd逻辑
+SET spark.sql.parser.quotedRegexColumnNames=true;
+
+
+INSERT OVERWRITE TABLE ldldwd.province
+SELECT
+*
+from ldlsrc.province
+where pt_import_date = '@src_partition_date@'
+;
